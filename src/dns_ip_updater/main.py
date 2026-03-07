@@ -50,19 +50,19 @@ def parse_args():
 
 def get_public_ipv4() -> ipaddress.IPv4Address | None:
     try:
-        response = requests.get(IPV4_MIRROR)
+        response = requests.get(IPV4_MIRROR, timeout=5)
         response.raise_for_status()
-        return ipaddress.IPv4Address(response.text)
-    except requests.RequestException:
+        return ipaddress.IPv4Address(response.text.strip())
+    except Exception:
         return None
 
 
 def get_public_ipv6() -> ipaddress.IPv6Address | None:
     try:
-        response = requests.get(IPV6_MIRROR)
+        response = requests.get(IPV6_MIRROR, timeout=5)
         response.raise_for_status()
-        return ipaddress.IPv6Address(response.text)
-    except requests.RequestException:
+        return ipaddress.IPv6Address(response.text.strip())
+    except Exception:
         return None
 
 
@@ -99,25 +99,27 @@ def get_records_list_by_zone_id(
 
 def patch_records_with_different_ips(
     records: list[dict],
-    ipv4: ipaddress.IPv4Address,
-    ipv6: ipaddress.IPv6Address,
+    ipv4: ipaddress.IPv4Address | None,
+    ipv6: ipaddress.IPv6Address | None,
 ) -> list[dict]:
     new_records = []
-    for record in records:
-        if record["type"] == "A" and ipaddress.IPv4Address(record["content"]) != ipv4:
-            print(f"replacing {record['content']} with {ipv4}")
-            new_record = record
-            new_record["content"] = ipv4
-            new_records.append(new_record)
 
-        if (
-            record["type"] == "AAAA"
-            and ipaddress.IPv6Address(record["content"]) != ipv6
-        ):
-            print(f"replacing {record['content']} with {ipv6}")
-            new_record = record
-            new_record["content"] = ipv6
-            new_records.append(new_record)
+    for record in records:
+
+        if record["type"] == "A" and ipv4 is not None:
+            if ipaddress.IPv4Address(record["content"]) != ipv4:
+                print(f"replacing {record['content']} with {ipv4}")
+                new_record = record.copy()
+                new_record["content"] = str(ipv4)
+                new_records.append(new_record)
+
+        elif record["type"] == "AAAA" and ipv6 is not None:
+            if ipaddress.IPv6Address(record["content"]) != ipv6:
+                print(f"replacing {record['content']} with {ipv6}")
+                new_record = record.copy()
+                new_record["content"] = str(ipv6)
+                new_records.append(new_record)
+
     return new_records
 
 
@@ -143,15 +145,16 @@ def main():
     zone_id = get_domain_zone_id(args.domain, headers)
     if zone_id is None:
         raise Exception("Unable to obtain zone id")
+
     records = get_records_list_by_zone_id(args.subdomain, args.domain, zone_id, headers)
     if records is None:
         raise Exception("Unable to obtain records")
+
     ipv4 = get_public_ipv4()
+    ipv6 = get_public_ipv6()
     if ipv4 is None:
         raise Exception("Unable to obtain ipv4 address")
-    ipv6 = get_public_ipv6()
-    if ipv6 is None:
-        raise Exception("Unable to obtain ipv6 address")
+
     new_records = patch_records_with_different_ips(records, ipv4, ipv6)
     set_new_records(new_records, zone_id, headers)
 

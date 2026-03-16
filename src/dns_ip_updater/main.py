@@ -2,24 +2,21 @@ import argparse
 import ipaddress
 import json
 import logging
-
 import requests
+from pathlib import Path
 
 logging.basicConfig(level=logging.DEBUG)
 
-BASE_URL = "https://api.hosting.ionos.com"
-ZONES_SUB_ADDRESS = "/dns/v1/zones"
+BASE_URL = "https://api.porkbun.com/api/json/v3"
+RETRIEVE_DNS_RECORDS_BY_NAME_SUB_ADDRESS = "/dns/retrieveByNameType"
+UPDATE_DNS_RECORDS_BY_NAME_SUB_ADDRESS = "/dns/editByNameType"
+DEFAULT_TTL = "600"
 IPV4_MIRROR = "https://api.ipify.org"
-IPV6_MIRROR = "https://api64.ipify.org"
 
 
-def load_config_from_json(path):
-    try:
-        with open(path, "r") as f:
-            data = json.load(f)
-            return data
-    except Exception as e:
-        print(f"Error reading JSON file {path}: {e}")
+def load_config_from_json(path: Path) -> dict[str, str]:
+    with open(path, "r") as f:
+        return json.load(f)
 
 
 def parse_args():
@@ -48,115 +45,103 @@ def parse_args():
     return parser.parse_args()
 
 
-def get_public_ipv4() -> ipaddress.IPv4Address | None:
+def get_ipv4_records(
+    subdomain: str, domain: str, headers: dict, payload: dict
+) -> list[ipaddress.IPv4Address]:
+    try:
+        response = requests.post(
+            BASE_URL
+            + RETRIEVE_DNS_RECORDS_BY_NAME_SUB_ADDRESS
+            + "/"
+            + domain
+            + "/A/"
+            + subdomain,
+            headers=headers,
+            json=payload,
+        )
+        response.raise_for_status()
+        json = response.json()
+        if json["status"] != "SUCCESS":
+            raise Exception(
+                f"Something went wrong when getting the A record for {subdomain}.{domain}: {response.text}"
+            )
+        return [ipaddress.IPv4Address(record["content"]) for record in json["records"]]
+    except requests.exceptions.HTTPError as e:
+        raise Exception(f"HTTP Error occurred: {e} Response content: {response.text}")
+
+
+def set_ipv4_records(
+    ip_address: ipaddress.IPv4Address,
+    subdomain: str,
+    domain: str,
+    headers: dict,
+    payload: dict,
+):
+    try:
+        updated_payload = {
+            "secretapikey": payload["secretapikey"],
+            "apikey": payload["apikey"],
+            "content": ip_address.exploded,
+            "ttl": DEFAULT_TTL,
+        }
+        response = requests.post(
+            BASE_URL
+            + UPDATE_DNS_RECORDS_BY_NAME_SUB_ADDRESS
+            + "/"
+            + domain
+            + "/A/"
+            + subdomain,
+            headers=headers,
+            json=updated_payload,
+        )
+        response.raise_for_status()
+        json = response.json()
+        if json["status"] != "SUCCESS":
+            raise Exception(
+                f"Something went wrong when setting the A record for {subdomain}.{domain} to {ipaddress}: {response.text}"
+            )
+        return [ipaddress.IPv4Address(record["content"]) for record in json["records"]]
+    except requests.exceptions.HTTPError as e:
+        raise Exception(f"HTTP Error occurred: {e} Response content: {response.text}")
+
+
+def get_public_ipv4() -> ipaddress.IPv4Address:
     try:
         response = requests.get(IPV4_MIRROR, timeout=5)
         response.raise_for_status()
         return ipaddress.IPv4Address(response.text.strip())
-    except Exception:
-        return None
+    except requests.exceptions.HTTPError as e:
+        raise Exception(f"HTTP Error occurred: {e} Response content: {response.text}")
 
 
-def get_public_ipv6() -> ipaddress.IPv6Address | None:
-    try:
-        response = requests.get(IPV6_MIRROR, timeout=5)
-        response.raise_for_status()
-        return ipaddress.IPv6Address(response.text.strip())
-    except Exception:
-        return None
-
-
-def get_domain_zone_id(domain: str, headers: dict) -> str | None:
-    try:
-        response = requests.get(BASE_URL + ZONES_SUB_ADDRESS, headers=headers)
-        response.raise_for_status()
-        json_response = response.json()
-
-        for item in json_response:
-            if item["name"] == domain:
-                return item["id"]
-        return None
-    except requests.RequestException:
-        return None
-
-
-def get_records_list_by_zone_id(
-    subdomain: str, domain: str, zone_id: str, headers: dict
-) -> list[dict] | None:
-    params = {"suffix": f"{subdomain}.{domain}", "recordType": "A,AAAA"}
-    try:
-        response = requests.get(
-            BASE_URL + ZONES_SUB_ADDRESS + "/" + zone_id,
-            headers=headers,
-            params=params,
-        )
-        response.raise_for_status()
-        json_response = response.json()
-        return json_response["records"]
-    except requests.RequestException:
-        return None
-
-
-def patch_records_with_different_ips(
-    records: list[dict],
-    ipv4: ipaddress.IPv4Address | None,
-    ipv6: ipaddress.IPv6Address | None,
-) -> list[dict]:
-    new_records = []
-
-    for record in records:
-
-        if record["type"] == "A" and ipv4 is not None:
-            if ipaddress.IPv4Address(record["content"]) != ipv4:
-                print(f"replacing {record['content']} with {ipv4}")
-                new_record = record.copy()
-                new_record["content"] = str(ipv4)
-                new_records.append(new_record)
-
-        elif record["type"] == "AAAA" and ipv6 is not None:
-            if ipaddress.IPv6Address(record["content"]) != ipv6:
-                print(f"replacing {record['content']} with {ipv6}")
-                new_record = record.copy()
-                new_record["content"] = str(ipv6)
-                new_records.append(new_record)
-
-    return new_records
-
-
-def set_new_records(records: list[dict], zone_id: str, headers: dict):
-    if len(records) != 0:
-        response = requests.patch(
-            BASE_URL + ZONES_SUB_ADDRESS + "/" + zone_id,
-            headers=headers,
-            json=records,
-        )
-        response.raise_for_status()
-
-
-def main():
+def main() -> int:
     args = parse_args()
     config = load_config_from_json(args.api_json)
+
     headers = {
         "accept": "application/json",
-        "X-API-Key": f"{config['public_prefix']}.{config['secret']}",
         "Content-Type": "application/json",
     }
+    payload = {
+        "secretapikey": str(config["secretapikey"]),
+        "apikey": str(config["apikey"]),
+    }
 
-    zone_id = get_domain_zone_id(args.domain, headers)
-    if zone_id is None:
-        raise Exception("Unable to obtain zone id")
+    current_ipv4_records = get_ipv4_records(
+        args.subdomain, args.domain, headers, payload
+    )
+    logging.info(f"Current IPv4 records: {current_ipv4_records}")
 
-    records = get_records_list_by_zone_id(args.subdomain, args.domain, zone_id, headers)
-    if records is None:
-        raise Exception("Unable to obtain records")
+    public_ipv4 = get_public_ipv4()
+    logging.info(f"Current public IPv4 address: {public_ipv4}")
+    if public_ipv4 in current_ipv4_records:
+        logging.info(
+            f"{current_ipv4_records}->{public_ipv4} Record already up to date, exiting"
+        )
+        return 0
 
-    ipv4 = get_public_ipv4()
-    ipv6 = get_public_ipv6()
-    if ipv4 is None:
-        raise Exception("Unable to obtain ipv4 address")
-
-    new_records = patch_records_with_different_ips(records, ipv4, ipv6)
-    set_new_records(new_records, zone_id, headers)
+    set_ipv4_records(public_ipv4, args.subdomain, args.domain, headers, payload)
+    return 0
 
 
 if __name__ == "__main__":
